@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "eventId": "synthetic-demo-001",
+  "taskType": "comparison-table",
+  "outcome": "success",
+  "verified": true,
+  "reusable": true,
+  "privacy": "redacted",
+  "incognito": false,
+  "evidence": {
+    "kind": "artifact-check",
+    "summary": "Output columns and item count checked."
+  },
+  "learning": {
+    "name": "comparison-table",
+    "description": "Compare options in a consistent source-backed table.",
+    "steps": ["Collect the supplied sources.", "Use the agreed columns.", "State unknown values plainly."],
+    "checks": ["Check column coverage.", "Check item count."],
+    "pitfalls": ["Do not invent sources or unsupported comparisons."]
+  }
+}

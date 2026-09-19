@@ -1,0 +1,10 @@
+{
+  "name": "oh-my-aside",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "bin": { "oma": "bin/oma.mjs" },
+  "scripts": { "test": "node --test test/*.test.mjs" }
+}
