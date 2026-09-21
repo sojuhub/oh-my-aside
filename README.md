@@ -4,7 +4,7 @@
 
 Oh My Aside lets a bootstrap-aware Aside session reuse checked scripts, recover through existing Markdown skills, and submit a small, redacted learning record after verified reusable work. The dependency-free Node CLI manages only its own skill packages, records replay hashes, snapshots first, archives inactive managed skills, and restores safely. Local lifecycle and routing need no network or API keys. The optional execution adapter calls the existing Aside CLI. No daemon or scheduler is installed.
 
-**Important boundary:** automation works only inside sessions that honor the installed bootstrap. Normal fresh root-chat global loading remains unverified. A session lifecycle/finished signal is not proof of successful work.
+**Important boundary:** automation works only inside sessions that honor the installed bootstrap. Fresh-chat managed-skill reuse has been observed in a bounded live test; see [verification](docs/VERIFICATION.md). This does not guarantee selection on every task. A session lifecycle/finished signal is not proof of successful work.
 
 ```mermaid
 flowchart LR

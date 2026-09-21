@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix direct managed-skill selection bypassing the coordinator and guessed route identifiers; record bounded fresh-chat verification.
+
 - Added optional verified Aside JavaScript recipes with whole-package hashes, snapshots, archive/restore and rollback, retaining MD-only compatibility.
 - Added route selection, persisted attempt reservations and receipts, conservative retry limits, and an external Aside CLI adapter without another browser or MCP server.
 - Added bootstrap guidance for existing-skill-first discovery, bounded MD recovery and verified recipe improvement; preserved Aside memory and original skills.

@@ -29,7 +29,7 @@ Use generic IDs and context slugs. Never store personal paths, account identifie
 
 `route --name NAME --context CONTEXT` returns a compact recommendation, without executing or counting success. Eligible scripts match the exact current package hash and context, have at least two observations in the last 30 days, and succeeded on their last two observations. Rank the last ten observations by success ratio first, then measured total tokens divided by successful runs. Failures count in cost. Missing or estimated usage is not treated as zero. Without measured costs, the deterministic order is not an assertion of savings.
 
-Two checks are a pilot gate, not statistical proof. Test representative variations. A failed script requires revalidation; an unresolved attempt blocks further script execution for that managed skill across versions. `--probe` permits a bounded authorized candidate check; `--probe --route-id ID` selects a deliberate comparison. Do not run every alternative on every task or manufacture separate MCP/CLI copies of identical code.
+Two checks are a pilot gate, not statistical proof. Test representative variations. A failed script requires revalidation; an unresolved attempt blocks further script execution for that managed skill across versions. `--probe` permits a bounded authorized candidate check; `--probe --route-id ID` selects a deliberate comparison. When a relevant route needs validation, the bootstrap may apply its MD checks and use one candidate probe to perform the current authorized read-only task. This lets a repaired version collect fresh evidence without extra real work. Do not run every alternative on every task or manufacture separate MCP/CLI copies of identical code.
 
 ## Native Aside
 

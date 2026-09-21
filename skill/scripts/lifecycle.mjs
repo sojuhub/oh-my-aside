@@ -203,11 +203,12 @@ async function archiveBody(a, id, item) {
   await ensureChild(a.state, 'archives', false);
   return packageFor(a, { ...item, archiveId: id }, true);
 }
-function render(record, packageName, executable = false) {
+function render(record, packageName, executionContext) {
   const list = (title, values) => `## ${title}\n\n${values.map((value) => `- ${value}`).join('\n')}\n`;
   const learning = record.learning;
-  const execution = executable ? '## Execution\n\nUse the verified route in `execution.json` and its matching `scripts/<route-id>.js` file through OMA `begin`/`record`; fall back to these Steps when the route is unavailable or fails verification.\n\n' : '';
-  return `---\nname: ${JSON.stringify(packageName)}\ndescription: ${JSON.stringify(learning.description)}\nmanagedBy: "oh-my-aside"\n---\n\n# ${packageName}\n\n${learning.description}\n\n${execution}${list('Steps', learning.steps)}\n${list('Checks', learning.checks)}\n${list('Pitfalls', learning.pitfalls)}`;
+  const coordinator = 'Before following this managed skill, read [the Oh My Aside bootstrap](../oh-my-aside/SKILL.md), resolving that path from this skill directory. This applies even when this skill was selected directly. Reuse a bootstrap already verified current for this task.\n\n';
+  const execution = executionContext ? `## Execution\n\nExact route arguments: \`--name ${packageName} --context ${executionContext}\`. Copy them exactly; never add another oma- prefix or invent a context from the task.\n\nUse the bootstrap CLI to \`route\`, then \`begin\` with these same arguments before running the selected script, and \`record\` its verified outcome. Do not copy or execute a recipe without reserving the attempt. Fall back to these Steps when no route is eligible or verification fails.\n\n` : '';
+  return `---\nname: ${JSON.stringify(packageName)}\ndescription: ${JSON.stringify(learning.description)}\nmanagedBy: "oh-my-aside"\n---\n\n# ${packageName}\n\n${learning.description}\n\n${coordinator}${execution}${list('Steps', learning.steps)}\n${list('Checks', learning.checks)}\n${list('Pitfalls', learning.pitfalls)}`;
 }
 function addAudit(state, at, stateName, packageName) {
   state.audit.push({ at, state: stateName, name: packageName });
@@ -353,7 +354,7 @@ export async function learn({ accountRoot, record, now = Date.now() }) {
       const oldItem = itemForTask(before, record.taskType);
       if (item.archived) fail('restore-required');
       const oldFiles = await packageFor(a, oldItem);
-      const next = render(record, item.name, Object.hasOwn(record, 'execution') ? Boolean(record.execution) : Object.hasOwn(oldFiles, 'execution.json'));
+      const next = render(record, item.name, record.execution?.context ?? (oldFiles['execution.json'] ? JSON.parse(oldFiles['execution.json']).context : undefined));
       const nextFiles = nextFilesFor(oldFiles, record, next);
       const snap = sameFiles(oldFiles, nextFiles) ? null : await createSnapshot(a, item.name, oldFiles);
       item.lastUsed = now;
@@ -370,7 +371,7 @@ export async function learn({ accountRoot, record, now = Date.now() }) {
     const packageName = `oma-${record.learning.name}`;
     if (before.skills[packageName]) fail('unmanaged-conflict');
     await assertVacant(packageDir(a, packageName));
-    const body = render(record, packageName, Object.hasOwn(record, 'execution'));
+    const body = render(record, packageName, record.execution?.context);
     const files = nextFilesFor({}, record, body);
     state.skills[packageName] = { name: packageName, taskType: record.taskType, hash: packageHash(files), lastUsed: now, pinned: false, archived: false, lastSnapshot: null };
     addEvent(state, record.eventId, payload, now, 'learned', packageName);

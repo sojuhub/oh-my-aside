@@ -2,7 +2,7 @@
 
 Oh My Aside는 사용자가 코드를 고치거나 skill 관리를 직접 하지 않고도, 반복 작업에서 검증된 방법을 다시 쓰도록 돕는 로컬 alpha 도구입니다. bootstrap을 지키는 Aside 세션이 검증한 절차와 선택적 JavaScript를 제출하면, CLI가 자신의 관리 패키지만 생성·갱신·보관합니다.
 
-가장 중요한 한계는 명확합니다. 자동화는 설치된 bootstrap을 실제로 따르는 세션 안에서만 동작합니다. 일반 새 root chat의 전역 로딩은 검증되지 않았습니다. lifecycle 또는 finished 이벤트도 성공 증거가 아닙니다.
+가장 중요한 한계는 명확합니다. 자동화는 설치된 bootstrap을 실제로 따르는 세션 안에서만 동작합니다. 일반 새 채팅에서 관리 스킬을 자동 선택하여 공통 지침과 저장 코드를 실행하는 경로는 제한된 실사용 테스트로 확인했습니다. 모든 작업에서 자동 선택된다는 보장은 아닙니다. [검증 범위](VERIFICATION.md)를 참고하세요. lifecycle 또는 finished 이벤트도 성공 증거가 아닙니다.
 
 `--account-root`는 모든 변경 명령에 필수입니다. Aside에게 account root를 확인하게 하며 추측하지 마십시오. 원본 transcript, credential, incognito 기록, 신뢰할 수 없는 코드, provider DB는 입력으로 사용하지 않습니다. privacy 검사는 휴리스틱이며 DLP 보장이 아닙니다.
 
