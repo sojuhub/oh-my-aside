@@ -4,10 +4,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { backfill, learn, maintain, pin, restore, rollback, setTestFault, status, validateRecord } from '../skill/scripts/lifecycle.mjs';
+import { backfill, learn, maintain, managedPackage, pin, restore, rollback, setTestFault, status, validateRecord, withManagedPackage } from '../skill/scripts/lifecycle.mjs';
+import { readPackage, validateExecution } from '../skill/scripts/packages.mjs';
 
 async function fixture(t) { const root = await fs.mkdtemp(path.join(process.env.OMA_TEST_TMP || os.tmpdir(), 'oma-')); t.after(() => fs.rm(root, { recursive: true, force: true })); return root; }
 function record(id, task = 'compare', skill = 'compare') { return { schemaVersion: 1, eventId: id, taskType: task, outcome: 'success', verified: true, reusable: true, privacy: 'redacted', incognito: false, evidence: { kind: 'artifact-check', summary: 'Checked the generated artifact.' }, learning: { name: skill, description: 'Compare supported options carefully.', steps: ['Collect approved sources.'], checks: ['Check the result.'], pitfalls: ['Do not invent facts.'] } }; }
+function executableRecord(id, code = 'if (!input?.ok) throw new Error("check failed"); return { verified: true };') { const value = record(id); value.execution = { schemaVersion: 1, context: 'compare', effect: 'read-only', routes: [{ id: 'run', transport: 'aside-repl', code }] }; return value; }
 
 test('learn creates normalized package', async (t) => { const root = await fixture(t); const result = await learn({ accountRoot: root, record: record('one'), now: 1 }); assert.equal(result.name, 'oma-compare'); assert.match(await fs.readFile(path.join(root, 'skills/user/oma-compare/SKILL.md'), 'utf8'), /name: "oma-compare"/); });
 test('event replay is idempotent', async (t) => { const root = await fixture(t); await learn({ accountRoot: root, record: record('one'), now: 1 }); assert.equal((await learn({ accountRoot: root, record: record('one'), now: 2 })).state, 'skipped'); });
@@ -138,3 +140,67 @@ test('state size limit rejects an update before body registry or pending changes
 });
 
 const DAY = 86_400_000;
+
+test('managed executable package updates, rolls back, archives, and restores as one version', async (t) => {
+  const root = await fixture(t);
+  const item = await learn({ accountRoot: root, record: record('md'), now: 1 });
+  const first = executableRecord('exec');
+  await learn({ accountRoot: root, record: first, now: 2 });
+  const packageDir = path.join(root, 'skills/user', item.name);
+  assert.match(await fs.readFile(path.join(packageDir, 'execution.json'), 'utf8'), /"run"/);
+  assert.equal((await managedPackage({ accountRoot: root, name: item.name })).files['scripts/run.js'], first.execution.routes[0].code);
+  await learn({ accountRoot: root, record: executableRecord('changed', 'return { verified: true };'), now: 3 });
+  await rollback({ accountRoot: root, name: item.name, now: 4 });
+  assert.match(await fs.readFile(path.join(packageDir, 'scripts/run.js'), 'utf8'), /input\?\.ok/);
+  await maintain({ accountRoot: root, apply: true, now: 100 * DAY });
+  const state = JSON.parse(await fs.readFile(path.join(root, '.oh-my-aside/registry.json')));
+  assert.match(await fs.readFile(path.join(root, '.oh-my-aside/archives', state.skills[item.name].archiveId, 'scripts/run.js'), 'utf8'), /input\?\.ok/);
+  await restore({ accountRoot: root, name: item.name, now: 100 * DAY });
+  assert.match(await fs.readFile(path.join(packageDir, 'scripts/run.js'), 'utf8'), /input\?\.ok/);
+});
+
+test('script tamper refuses managed package access', async (t) => {
+  const root = await fixture(t); const item = await learn({ accountRoot: root, record: executableRecord('a'), now: 1 });
+  await fs.appendFile(path.join(root, 'skills/user', item.name, 'scripts/run.js'), '\n');
+  await assert.rejects(() => managedPackage({ accountRoot: root, name: item.name }), { code: 'manual-drift' });
+});
+
+test('invalid execution and extra package files are rejected', async (t) => {
+  const root = await fixture(t); const bad = executableRecord('bad', 'if (');
+  await assert.rejects(() => learn({ accountRoot: root, record: bad }), { code: 'invalid-execution' });
+  assert.throws(() => validateExecution({ schemaVersion: 1, context: 'compare', effect: 'read-only', routes: [{ id: 'run', transport: 'aside-repl', code: 'return { verified: true };', extra: true }] }), { code: 'invalid-execution' });
+  const item = await learn({ accountRoot: root, record: executableRecord('good'), now: 1 });
+  await fs.writeFile(path.join(root, 'skills/user', item.name, 'extra'), 'x');
+  await assert.rejects(() => readPackage(path.join(root, 'skills/user', item.name)), { code: 'invalid-package' });
+});
+
+test('multi-file commit failure restores the whole executable package', async (t) => {
+  const root = await fixture(t); const item = await learn({ accountRoot: root, record: executableRecord('a'), now: 1 });
+  const packageDir = path.join(root, 'skills/user', item.name); const before = await readPackage(packageDir);
+  setTestFault((stage) => { if (stage === 'before-registry-save') throw Object.assign(new Error('x'), { code: 'commit-failed' }); });
+  t.after(() => setTestFault(undefined));
+  await assert.rejects(() => learn({ accountRoot: root, record: executableRecord('b', 'return { verified: true };'), now: 2 }), { code: 'commit-failed' });
+  assert.deepEqual(await readPackage(packageDir), before);
+});
+
+test('rollback failure restores scripts after an executable package is stripped to its MD snapshot', async (t) => {
+  const root = await fixture(t); const item = await learn({ accountRoot: root, record: record('md'), now: 1 });
+  await learn({ accountRoot: root, record: executableRecord('exec'), now: 2 });
+  const packageDir = path.join(root, 'skills/user', item.name); const before = await readPackage(packageDir);
+  setTestFault((stage) => { if (stage === 'before-registry-save') throw Object.assign(new Error('x'), { code: 'commit-failed' }); });
+  t.after(() => setTestFault(undefined));
+  await assert.rejects(() => rollback({ accountRoot: root, name: item.name, now: 3 }), { code: 'commit-failed' });
+  assert.deepEqual(await readPackage(packageDir), before);
+});
+
+test('managed package reads stay read-only while touch refreshes inactivity', async (t) => {
+  const root = await fixture(t); const item = await learn({ accountRoot: root, record: executableRecord('a'), now: 1 });
+  const registryFile = path.join(root, '.oh-my-aside/registry.json'); const before = await fs.readFile(registryFile, 'utf8');
+  await managedPackage({ accountRoot: root, name: item.name });
+  assert.equal(await fs.readFile(registryFile, 'utf8'), before);
+  await withManagedPackage({ accountRoot: root, name: item.name, touch: true, now: 100 * DAY }, (bundle) => bundle);
+  await withManagedPackage({ accountRoot: root, name: item.name, touch: true, now: 1 }, (bundle) => bundle);
+  const state = JSON.parse(await fs.readFile(registryFile, 'utf8'));
+  assert.equal(state.skills[item.name].lastUsed, 100 * DAY);
+  assert.deepEqual((await maintain({ accountRoot: root, now: 100 * DAY })).names, []);
+});

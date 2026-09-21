@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { account, atomic, fail, hash, readRegular, safeDirectory, withLock } from './safety.mjs';
+import { executionFiles, packageHash, readPackage, validateExecution, validatePackageFiles } from './packages.mjs';
 
 const DAY = 86_400_000;
 const MAX_RECORD = 65_536;
@@ -65,13 +66,15 @@ function checkTextList(value) {
 export function validateRecord(record) {
   let bytes;
   try { bytes = Buffer.byteLength(JSON.stringify(record)); } catch { fail('invalid-record'); }
-  if (bytes > MAX_RECORD || !exact(record, ['schemaVersion', 'eventId', 'taskType', 'outcome', 'verified', 'reusable', 'privacy', 'incognito', 'evidence', 'learning'])) fail('invalid-record');
+  const keys = Object.hasOwn(record ?? {}, 'execution') ? ['schemaVersion', 'eventId', 'taskType', 'outcome', 'verified', 'reusable', 'privacy', 'incognito', 'evidence', 'learning', 'execution'] : ['schemaVersion', 'eventId', 'taskType', 'outcome', 'verified', 'reusable', 'privacy', 'incognito', 'evidence', 'learning'];
+  if (bytes > MAX_RECORD || !exact(record, keys)) fail('invalid-record');
   if (record.schemaVersion !== 1 || !eventId(record.eventId) || !taskType(record.taskType) || record.outcome !== 'success' || record.verified !== true || record.reusable !== true || record.privacy !== 'redacted' || record.incognito !== false) fail('invalid-record');
   if (!exact(record.evidence, ['kind', 'summary']) || !EVIDENCE_KINDS.has(record.evidence.kind) || !text(record.evidence.summary)) fail('invalid-record');
   const learning = record.learning;
   if (!exact(learning, ['name', 'description', 'steps', 'checks', 'pitfalls']) || !slug(learning.name) || !text(learning.description) || !checkTextList(learning.steps) || !checkTextList(learning.checks) || !checkTextList(learning.pitfalls)) fail('invalid-record');
   const combined = [record.taskType, record.evidence.kind, record.evidence.summary, learning.name, learning.description, ...learning.steps, ...learning.checks, ...learning.pitfalls].join('\n');
   if (TEXT_DANGER.test(combined)) fail('unsafe-record');
+  if (Object.hasOwn(record, 'execution')) validateExecution(record.execution);
   return record;
 }
 
@@ -133,40 +136,52 @@ function packageDir(a, packageName) {
   if (!name(packageName)) fail('invalid-name');
   return path.join(a.user, packageName);
 }
-async function fileFor(a, packageName, required = true) {
-  const directory = packageDir(a, packageName);
-  let dir;
-  try { dir = await fs.lstat(directory); } catch (error) { if (!required && error?.code === 'ENOENT') return null; throw error; }
-  if (dir.isSymbolicLink() || !dir.isDirectory()) fail('unsafe-path');
-  const file = path.join(directory, 'SKILL.md');
-  const body = await readRegular(file, { optional: !required, maxBytes: MAX_STATE });
-  if (body === null) return null;
-  return file;
-}
 async function exactPackage(a, packageName) {
   const directory = packageDir(a, packageName);
-  const stat = await fs.lstat(directory);
-  if (stat.isSymbolicLink() || !stat.isDirectory()) fail('unsafe-path');
-  const entries = await fs.readdir(directory);
-  if (entries.length !== 1 || entries[0] !== 'SKILL.md') fail('package-not-archivable');
-  await fileFor(a, packageName);
+  await readPackage(directory);
   return directory;
 }
-async function bodyFor(a, item) {
-  const file = await fileFor(a, item.name);
-  const body = (await readRegular(file, { maxBytes: MAX_STATE })).toString('utf8');
-  if (hash(body) !== item.hash) fail('manual-drift');
-  return body;
+async function packageFor(a, item, archived = false) {
+  const directory = archived ? archivePath(a, item.archiveId) : packageDir(a, item.name);
+  let files;
+  try { files = await readPackage(directory); } catch (error) { if (error?.code === 'invalid-package') fail('package-not-archivable'); throw error; }
+  if (packageHash(files) !== item.hash) fail('manual-drift');
+  return files;
+}
+function sameFiles(left, right) {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  return [...keys].every((key) => left[key] === right[key]);
+}
+function nextFilesFor(oldFiles, record, body) {
+  const files = { ...oldFiles, 'SKILL.md': body };
+  if (Object.hasOwn(record, 'execution')) {
+    for (const file of Object.keys(files)) if (file === 'execution.json' || file.startsWith('scripts/')) delete files[file];
+    if (record.execution) Object.assign(files, executionFiles(record.execution));
+  }
+  return files;
+}
+async function writePackage(directory, files, before = {}) {
+  await safeDirectory(directory, true);
+  if (Object.keys(files).some((file) => file.startsWith('scripts/'))) await safeDirectory(path.join(directory, 'scripts'), true);
+  for (const file of Object.keys(files).sort()) if (files[file] !== before[file]) await atomic(path.join(directory, file), files[file]);
+  for (const file of Object.keys(before).filter((file) => !Object.hasOwn(files, file)).sort()) {
+    const target = path.join(directory, file);
+    const body = (await readRegular(target, { maxBytes: MAX_STATE })).toString('utf8');
+    if (body !== before[file]) fail('recovery-needed');
+    await fs.unlink(target);
+  }
+  if (!Object.keys(files).some((file) => file.startsWith('scripts/'))) await fs.rmdir(path.join(directory, 'scripts')).catch((error) => { if (error?.code !== 'ENOENT' && error?.code !== 'ENOTEMPTY') throw error; });
 }
 async function ensureChild(parent, child, create = false) {
   await safeDirectory(parent, false);
   return safeDirectory(path.join(parent, child), create);
 }
-async function createSnapshot(a, packageName, body) {
+async function createSnapshot(a, packageName, files) {
   const directory = path.join(a.state, 'snapshots');
   await ensureChild(a.state, 'snapshots', true);
   const id = `${crypto.randomUUID()}.json`;
-  await atomic(path.join(directory, id), encode({ version: 1, name: packageName, body, hash: hash(body) }));
+  const value = Object.keys(files).length === 1 && Object.hasOwn(files, 'SKILL.md') ? { version: 1, name: packageName, body: files['SKILL.md'], hash: hash(files['SKILL.md']) } : { version: 2, name: packageName, files, hash: packageHash(files) };
+  await atomic(path.join(directory, id), encode(value));
   return id;
 }
 async function loadSnapshot(a, id, packageName) {
@@ -174,8 +189,11 @@ async function loadSnapshot(a, id, packageName) {
   const directory = path.join(a.state, 'snapshots');
   await ensureChild(a.state, 'snapshots', false);
   const value = await readJson(path.join(directory, id), 'invalid-snapshot');
-  if (!exact(value, ['version', 'name', 'body', 'hash']) || value.version !== 1 || value.name !== packageName || typeof value.body !== 'string' || !digest(value.hash) || hash(value.body) !== value.hash) fail('invalid-snapshot');
-  return value;
+  if (exact(value, ['version', 'name', 'body', 'hash']) && value.version === 1 && value.name === packageName && typeof value.body === 'string' && digest(value.hash) && hash(value.body) === value.hash) return { files: { 'SKILL.md': value.body }, hash: value.hash };
+  if (!exact(value, ['version', 'name', 'files', 'hash']) || value.version !== 2 || value.name !== packageName || !plain(value.files) || !digest(value.hash)) fail('invalid-snapshot');
+  try { validatePackageFiles(value.files); } catch { fail('invalid-snapshot'); }
+  if (packageHash(value.files) !== value.hash) fail('invalid-snapshot');
+  return { files: value.files, hash: value.hash };
 }
 function archivePath(a, id) {
   if (!archiveId(id)) fail('missing-archive');
@@ -183,19 +201,13 @@ function archivePath(a, id) {
 }
 async function archiveBody(a, id, item) {
   await ensureChild(a.state, 'archives', false);
-  const directory = archivePath(a, id);
-  const stat = await fs.lstat(directory).catch((error) => error?.code === 'ENOENT' ? null : Promise.reject(error));
-  if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) fail('unsafe-path');
-  const entries = await fs.readdir(directory);
-  if (entries.length !== 1 || entries[0] !== 'SKILL.md') fail('unsafe-path');
-  const body = (await readRegular(path.join(directory, 'SKILL.md'), { maxBytes: MAX_STATE })).toString('utf8');
-  if (hash(body) !== item.hash) fail('manual-drift');
-  return body;
+  return packageFor(a, { ...item, archiveId: id }, true);
 }
-function render(record, packageName) {
+function render(record, packageName, executable = false) {
   const list = (title, values) => `## ${title}\n\n${values.map((value) => `- ${value}`).join('\n')}\n`;
   const learning = record.learning;
-  return `---\nname: ${JSON.stringify(packageName)}\ndescription: ${JSON.stringify(learning.description)}\nmanagedBy: "oh-my-aside"\n---\n\n# ${packageName}\n\n${learning.description}\n\n${list('Steps', learning.steps)}\n${list('Checks', learning.checks)}\n${list('Pitfalls', learning.pitfalls)}`;
+  const execution = executable ? '## Execution\n\nUse the verified route in `execution.json` and its matching `scripts/<route-id>.js` file through OMA `begin`/`record`; fall back to these Steps when the route is unavailable or fails verification.\n\n' : '';
+  return `---\nname: ${JSON.stringify(packageName)}\ndescription: ${JSON.stringify(learning.description)}\nmanagedBy: "oh-my-aside"\n---\n\n# ${packageName}\n\n${learning.description}\n\n${execution}${list('Steps', learning.steps)}\n${list('Checks', learning.checks)}\n${list('Pitfalls', learning.pitfalls)}`;
 }
 function addAudit(state, at, stateName, packageName) {
   state.audit.push({ at, state: stateName, name: packageName });
@@ -239,34 +251,63 @@ async function inspectedPackage(directory, expectedHash) {
   let stat;
   try { stat = await fs.lstat(directory); } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
   if (stat.isSymbolicLink() || !stat.isDirectory()) fail('recovery-needed');
-  const entries = await fs.readdir(directory);
-  if (entries.length !== 1 || entries[0] !== 'SKILL.md') fail('recovery-needed');
-  const file = path.join(directory, 'SKILL.md');
-  const body = await readRegular(file, { maxBytes: MAX_STATE });
-  if (hash(body) !== expectedHash) fail('recovery-needed');
+  const files = await readPackage(directory);
+  if (packageHash(files) !== expectedHash) fail('recovery-needed');
   return true;
+}
+async function loosePackage(directory) {
+  const stat = await fs.lstat(directory).catch((error) => error?.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!stat) return null;
+  if (stat.isSymbolicLink() || !stat.isDirectory()) fail('recovery-needed');
+  const files = {};
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    if (entry.name === 'SKILL.md' || entry.name === 'execution.json') {
+      if (!entry.isFile()) fail('recovery-needed');
+      files[entry.name] = (await readRegular(path.join(directory, entry.name), { maxBytes: MAX_STATE })).toString('utf8');
+    } else if (entry.name === 'scripts') {
+      if (!entry.isDirectory()) fail('recovery-needed');
+      for (const script of await fs.readdir(path.join(directory, 'scripts'), { withFileTypes: true })) {
+        if (!script.isFile() || !/^[a-z0-9]+(?:-[a-z0-9]+)*\.js$/.test(script.name)) fail('recovery-needed');
+        files[`scripts/${script.name}`] = (await readRegular(path.join(directory, 'scripts', script.name), { maxBytes: MAX_STATE })).toString('utf8');
+      }
+    } else fail('recovery-needed');
+  }
+  return files;
+}
+async function removePackage(directory, expected) {
+  const files = await loosePackage(directory);
+  if (!files) return;
+  for (const [file, body] of Object.entries(files)) if (expected[file] !== body) fail('recovery-needed');
+  for (const file of Object.keys(files).sort().reverse()) await fs.unlink(path.join(directory, file));
+  await fs.rmdir(path.join(directory, 'scripts')).catch((error) => { if (error?.code !== 'ENOENT') throw error; });
+  await fs.rmdir(directory);
 }
 async function ownedRemove(a, change) {
   const directory = packageDir(a, change.name);
-  let stat;
-  try { stat = await fs.lstat(directory); } catch (error) { if (error?.code === 'ENOENT') return; throw error; }
-  if (stat.isSymbolicLink() || !stat.isDirectory()) fail('recovery-needed');
-  const entries = await fs.readdir(directory);
-  if (entries.length === 0) { await fs.rmdir(directory); return; }
-  if (entries.length !== 1 || entries[0] !== 'SKILL.md') fail('recovery-needed');
-  const body = await readRegular(path.join(directory, 'SKILL.md'), { maxBytes: MAX_STATE });
-  if (hash(body) !== change.hash) fail('recovery-needed');
-  await fs.unlink(path.join(directory, 'SKILL.md'));
-  await fs.rmdir(directory);
+  await removePackage(directory, change.afterFiles ?? { 'SKILL.md': change.body ?? '' });
+}
+async function compensateWrite(a, change) {
+  const directory = packageDir(a, change.name);
+  const current = await loosePackage(directory);
+  if (!current) fail('recovery-needed');
+  const allowed = new Set([...Object.keys(change.beforeFiles), ...Object.keys(change.afterFiles)]);
+  for (const [file, body] of Object.entries(current)) {
+    if (!allowed.has(file) || (body !== change.beforeFiles[file] && body !== change.afterFiles[file])) fail('recovery-needed');
+  }
+  if (Object.keys(change.beforeFiles).some((file) => file.startsWith('scripts/'))) await safeDirectory(path.join(directory, 'scripts'), true);
+  for (const file of Object.keys(change.beforeFiles).sort()) {
+    if (current[file] !== change.beforeFiles[file]) await atomic(path.join(directory, file), change.beforeFiles[file]);
+  }
+  for (const file of Object.keys(current).filter((file) => !Object.hasOwn(change.beforeFiles, file)).sort()) {
+    if (current[file] === change.afterFiles[file]) await fs.unlink(path.join(directory, file));
+  }
+  if (!Object.keys(change.beforeFiles).some((file) => file.startsWith('scripts/'))) await fs.rmdir(path.join(directory, 'scripts')).catch((error) => { if (error?.code !== 'ENOENT') throw error; });
+  if (packageHash(await readPackage(directory)) !== change.beforeHash) fail('recovery-needed');
 }
 async function compensate(a, changes) {
   for (const change of [...changes].reverse()) {
     if (change.kind === 'write') {
-      const file = await fileFor(a, change.name);
-      const body = (await readRegular(file, { maxBytes: MAX_STATE })).toString('utf8');
-      if (hash(body) === hash(change.before)) continue;
-      if (hash(body) !== change.after) fail('recovery-needed');
-      await atomic(file, change.before);
+      await compensateWrite(a, change);
     }
     if (change.kind === 'create') await ownedRemove(a, change);
     if (change.kind === 'archive') {
@@ -311,27 +352,29 @@ export async function learn({ accountRoot, record, now = Date.now() }) {
     if (item) {
       const oldItem = itemForTask(before, record.taskType);
       if (item.archived) fail('restore-required');
-      const old = await bodyFor(a, oldItem);
-      const next = render(record, item.name);
-      const snap = old === next ? null : await createSnapshot(a, item.name, old);
+      const oldFiles = await packageFor(a, oldItem);
+      const next = render(record, item.name, Object.hasOwn(record, 'execution') ? Boolean(record.execution) : Object.hasOwn(oldFiles, 'execution.json'));
+      const nextFiles = nextFilesFor(oldFiles, record, next);
+      const snap = sameFiles(oldFiles, nextFiles) ? null : await createSnapshot(a, item.name, oldFiles);
       item.lastUsed = now;
-      if (old === next) {
+      if (sameFiles(oldFiles, nextFiles)) {
         addEvent(state, record.eventId, payload, now, 'reused', item.name);
         await transaction(a, before, [], async () => {}, state);
         return { ok: true, state: 'reused', name: item.name };
       }
-      item.hash = hash(next); item.lastSnapshot = snap;
+      item.hash = packageHash(nextFiles); item.lastSnapshot = snap;
       addEvent(state, record.eventId, payload, now, 'updated', item.name);
-      await transaction(a, before, [{ kind: 'write', name: item.name, before: old, after: hash(next) }], async () => atomic(await fileFor(a, item.name), next), state);
+      await transaction(a, before, [{ kind: 'write', name: item.name, beforeFiles: oldFiles, afterFiles: nextFiles, beforeHash: packageHash(oldFiles), afterHash: packageHash(nextFiles) }], async () => writePackage(packageDir(a, item.name), nextFiles, oldFiles), state);
       return { ok: true, state: 'updated', name: item.name };
     }
     const packageName = `oma-${record.learning.name}`;
     if (before.skills[packageName]) fail('unmanaged-conflict');
     await assertVacant(packageDir(a, packageName));
-    const body = render(record, packageName);
-    state.skills[packageName] = { name: packageName, taskType: record.taskType, hash: hash(body), lastUsed: now, pinned: false, archived: false, lastSnapshot: null };
+    const body = render(record, packageName, Object.hasOwn(record, 'execution'));
+    const files = nextFilesFor({}, record, body);
+    state.skills[packageName] = { name: packageName, taskType: record.taskType, hash: packageHash(files), lastUsed: now, pinned: false, archived: false, lastSnapshot: null };
     addEvent(state, record.eventId, payload, now, 'learned', packageName);
-    await transaction(a, before, [{ kind: 'create', name: packageName, hash: hash(body) }], async () => { await fs.mkdir(packageDir(a, packageName), { mode: 0o700 }); await atomic(path.join(packageDir(a, packageName), 'SKILL.md'), body); }, state);
+    await transaction(a, before, [{ kind: 'create', name: packageName, hash: packageHash(files), afterFiles: files }], async () => writePackage(packageDir(a, packageName), files), state);
     return { ok: true, state: 'learned', name: packageName };
   });
 }
@@ -354,7 +397,7 @@ export async function pin({ accountRoot, name: packageName, off = false, now = D
     await ensureNoPending(a);
     const before = await readState(a); const item = before.skills[packageName];
     if (!item || item.archived) fail('missing-skill');
-    await bodyFor(a, item);
+    await packageFor(a, item);
     const state = clone(before); state.skills[packageName].pinned = !off; addAudit(state, now, off ? 'unpinned' : 'pinned', packageName);
     await transaction(a, before, [], async () => {}, state);
     return { ok: true, name: packageName, pinned: !off };
@@ -373,11 +416,11 @@ export async function maintain({ accountRoot, apply = false, now = Date.now() })
     const before = await readState(a); const names = eligible(before, now); const prepared = [];
     await ensureChild(a.state, 'archives', true);
     for (const packageName of names) {
-      const item = before.skills[packageName]; const body = await bodyFor(a, item); await exactPackage(a, packageName);
+      const item = before.skills[packageName]; const files = await packageFor(a, item); await exactPackage(a, packageName);
       const archive = `arc-${crypto.randomUUID()}`; await assertVacant(archivePath(a, archive), 'archive-conflict');
-      prepared.push({ name: packageName, body, archive, snapshot: await createSnapshot(a, packageName, body) });
+      prepared.push({ name: packageName, files, archive, snapshot: await createSnapshot(a, packageName, files) });
     }
-    const state = clone(before); const changes = prepared.map((row) => ({ kind: 'archive', name: row.name, archiveId: row.archive, hash: hash(row.body) }));
+    const state = clone(before); const changes = prepared.map((row) => ({ kind: 'archive', name: row.name, archiveId: row.archive, hash: packageHash(row.files) }));
     for (const row of prepared) { const item = state.skills[row.name]; item.archived = true; item.archiveId = row.archive; item.lastSnapshot = row.snapshot; addAudit(state, now, 'archived', row.name); }
     await transaction(a, before, changes, async () => { for (const row of prepared) { await fs.rename(packageDir(a, row.name), archivePath(a, row.archive)); await testFault?.('after-archive-rename'); } }, state);
     return { ok: true, state: 'archived', names };
@@ -407,11 +450,37 @@ export async function rollback({ accountRoot, name: packageName, now = Date.now(
     await ensureNoPending(a);
     const before = await readState(a); const item = before.skills[packageName];
     if (!item || item.archived || !item.lastSnapshot) fail('no-rollback');
-    const current = await bodyFor(a, item); const prior = await loadSnapshot(a, item.lastSnapshot, packageName); const reverse = await createSnapshot(a, packageName, current);
+    const current = await packageFor(a, item); const prior = await loadSnapshot(a, item.lastSnapshot, packageName); const reverse = await createSnapshot(a, packageName, current);
     const state = clone(before); state.skills[packageName].hash = prior.hash; state.skills[packageName].lastSnapshot = reverse; state.skills[packageName].lastUsed = now; addAudit(state, now, 'rolled-back', packageName);
-    await transaction(a, before, [{ kind: 'write', name: packageName, before: current, after: prior.hash }], async () => atomic(await fileFor(a, packageName), prior.body), state);
+    await transaction(a, before, [{ kind: 'write', name: packageName, beforeFiles: current, afterFiles: prior.files, beforeHash: packageHash(current), afterHash: prior.hash }], async () => writePackage(packageDir(a, packageName), prior.files, current), state);
     return { ok: true, state: 'rolled-back', name: packageName };
   });
+}
+
+export async function withManagedPackage({ accountRoot, name: packageName, touch = false, now = Date.now() }, callback) {
+  if (!name(packageName)) fail('invalid-name');
+  if (typeof touch !== 'boolean' || typeof callback !== 'function') fail('invalid-request');
+  now = nowValue(now);
+  const a = await account(accountRoot, false);
+  return withLock(a, async () => {
+    await ensureNoPending(a);
+    const state = await readState(a);
+    const item = state.skills[packageName];
+    if (!item || item.archived) fail('missing-skill');
+    const files = await packageFor(a, item);
+    const bundle = { name: item.name, taskType: item.taskType, hash: item.hash, files };
+    const result = await callback(bundle, a);
+    if (touch) {
+      const next = clone(state);
+      next.skills[packageName].lastUsed = Math.max(item.lastUsed, now);
+      await transaction(a, state, [], async () => {}, next);
+    }
+    return result;
+  });
+}
+
+export async function managedPackage(options) {
+  return withManagedPackage(options, (bundle) => bundle);
 }
 
 export async function status({ accountRoot }) {
@@ -429,7 +498,7 @@ export async function doctor({ accountRoot }) {
     let active = 0; let archived = 0;
     for (const item of Object.values(state.skills)) {
       if (item.archived) { await archiveBody(a, item.archiveId, item); archived += 1; }
-      else { await bodyFor(a, item); active += 1; }
+      else { await packageFor(a, item); active += 1; }
     }
     return { ok: true, pending: false, active, archived };
   } catch (error) {

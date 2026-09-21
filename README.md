@@ -2,17 +2,22 @@
 
 > Alpha: local lifecycle tooling for skills without skill-management chores. It is not an autonomous self-modifying model, semantic evaluator, secure sandbox, or privacy/DLP guarantee.
 
-Oh My Aside lets a bootstrap-aware Aside session submit a small, redacted, verified learning record after reusable work. The dependency-free Node CLI deterministically creates or updates only its own Markdown skills, records replay hashes, snapshots first, archives inactive managed skills, and restores safely. It makes no network calls, needs no API keys, and runs no daemon or scheduler.
+Oh My Aside lets a bootstrap-aware Aside session reuse checked scripts, recover through existing Markdown skills, and submit a small, redacted learning record after verified reusable work. The dependency-free Node CLI manages only its own skill packages, records replay hashes, snapshots first, archives inactive managed skills, and restores safely. Local lifecycle and routing need no network or API keys. The optional execution adapter calls the existing Aside CLI. No daemon or scheduler is installed.
 
 **Important boundary:** automation works only inside sessions that honor the installed bootstrap. Normal fresh root-chat global loading remains unverified. A session lifecycle/finished signal is not proof of successful work.
 
 ```mermaid
 flowchart LR
-  A[Bootstrap-aware task] --> B[Redacted verified record]
-  B --> C[Local validation]
-  C --> D[Managed Markdown skill]
-  D --> E[Preview or archive]
-  E --> F[Restore or rollback]
+  A[Recurring task] --> B{Checked script available?}
+  B -->|Yes| C[Execute and verify]
+  B -->|No| D[Follow existing MD]
+  C -->|Verified| E[Finish and record]
+  C -->|Failed| D
+  D --> F[One targeted repair]
+  F --> G{Checks pass?}
+  G -->|Yes| H[Save improved MD and script]
+  G -->|No| I[Stop and report]
+  H -.->|Future task| B
 ```
 
 ## Quickstart
@@ -39,7 +44,15 @@ Initial history backfill is off. Aside may ask once whether to skip history, rev
 
 See [examples/safe-learning.json](examples/safe-learning.json). Records must be successful, verified, reusable, redacted, non-incognito schema version 1 objects. The validator rejects raw/history/auth fields, credential-like strings, personal absolute paths, personal emails, private-key headers, bearer-like text, and permission-bypass instructions. This is a simple heuristic, not DLP. Rejected bodies are never echoed or persisted.
 
-The generated package is only `skills/user/oma-<slug>/SKILL.md`. Exact `taskType` identity deduplicates; a changed verified procedure updates its existing managed skill after a snapshot and hash-drift check. Unmanaged name conflicts fail closed. Markdown procedures only are generated in alpha, never executable scripts or model fine-tuning.
+The generated package is `skills/user/oma-<slug>/SKILL.md`, optionally with `execution.json` and caller-verified `scripts/<route>.js` recipes. Exact `taskType` identity deduplicates; a changed verified procedure updates its existing managed skill after a whole-package snapshot and hash-drift check. Unmanaged name conflicts fail closed. The agent authors and checks recipes; the CLI validates and stores them without a code-generating model or fine-tuning.
+
+## Script reuse and repair
+
+Users ask for the task normally. In a bootstrap-aware session, the coordinator discovers applicable built-in/user skills, selects a checked script, verifies its result, and falls back to the existing MD procedure on failure. Verified repair updates the same managed skill and script together. Original user/built-in skills and Aside memory are preserved.
+
+`route` recommends a route, `begin` reserves an attempt for native Aside execution, `record --receipt FILE` records the outcome, and `run` provides the external CLI adapter. Each requires `--account-root`. Unknown/unfinished results block blind retries. The pilot selects matching current versions with two recent successful observations, ranks reliability first, then measured tokens including failures. Missing usage remains unknown; savings require measurement.
+
+See the [execution contract and commands](skill/references/execution.md) and [Hermes/Aside review (Korean)](docs/HERMES-REVIEW.ko.md). Native Aside uses its existing JavaScript tool, not a nested Aside CLI. Automatic recipes are restricted by policy to authorized read-only tasks. Script declarations and syntax checks are not a sandbox; the host remains the permission boundary.
 
 ## Local state and safety
 

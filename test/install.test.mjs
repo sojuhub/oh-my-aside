@@ -9,7 +9,7 @@ const tempBase = process.env.OMA_TEST_TMP || os.tmpdir();
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(tempBase, 'oma-install-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  return root;
+  return fs.realpath(root);
 }
 async function source(t, label = 'one') {
   const root = path.join(await fixture(t), 'skill');
