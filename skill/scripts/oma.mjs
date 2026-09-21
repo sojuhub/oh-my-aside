@@ -1,9 +1,11 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 import * as installer from './install.mjs';
 import { main as lifecycle, status as lifecycleStatus } from './lifecycle.mjs';
 import { main as retrieval } from './skills.mjs';
 import { account, fail } from './safety.mjs';
+import { main as execution } from './execution.mjs';
 
 function rootFrom(argv) {
   const positions = argv.reduce((all, value, index) => value === '--account-root' ? [...all, index] : all, []);
@@ -22,16 +24,17 @@ function write(io, value) {
   io.stdout.write(`${JSON.stringify(value)}\n`);
 }
 export function invokedDirectly(meta = import.meta) {
-  return process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(meta.url));
+  return process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(meta.url));
 }
 
 export async function run(argv, io = { stdout: process.stdout, stderr: process.stderr }) {
   const command = argv[0];
   if (!command || argv.includes('--help')) {
-    io.stdout.write('oma install|uninstall|status|doctor|catalog|search|load|learn|backfill|maintain|restore|rollback|pin --account-root DIR\n');
+    io.stdout.write('oma install|uninstall|status|doctor|catalog|search|load|learn|backfill|maintain|restore|rollback|pin|route|begin|record|run --account-root DIR\n');
     return 0;
   }
   const root = rootFrom(argv);
+  if (['route', 'begin', 'record', 'run'].includes(command)) return execution(argv, io);
   if (['install', 'uninstall', 'status', 'doctor'].includes(command) && withoutAccountRoot(argv).length !== 1) fail('invalid-request');
   if (['catalog', 'search', 'load'].includes(command)) {
     const a = await account(root, false);

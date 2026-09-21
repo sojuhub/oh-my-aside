@@ -357,7 +357,7 @@ export async function status(options) {
 
 export async function doctor(options) {
   const result = await status(options);
-  return { ...result, checks: ['bootstrap-dependent', 'root-chat-unverified'] };
+  return { ...result, checks: ['bootstrap-dependent', 'session-execution-not-checked'] };
 }
 
 export async function main(args, io = { out: console.log }) {
